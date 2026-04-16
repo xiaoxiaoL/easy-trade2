@@ -1,0 +1,31 @@
+name: Daily Trade
+
+on:
+  schedule:
+    # 21:00 UTC = 4pm ET (EDT summer) / 5pm ET (EST winter) — after market close
+    - cron: '0 21 * * 1-5'
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run trading bot
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_BASE_URL: https://paper-api.alpaca.markets
+        run: python scheduler/batch.py
