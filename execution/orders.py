@@ -25,8 +25,7 @@ def execute(snapshot: MarketSnapshot, signal: Signal) -> str:
         qty_held = 0.0
 
     if signal == Signal.BUY and qty_held == 0:
-        # Use 95% of available cash
-        qty = int((cash * 0.95) / snapshot.price)
+        qty = int((cash * config.MAX_POSITION_PCT) / snapshot.price)
         if qty < 1:
             return "skipped — insufficient cash"
         order = MarketOrderRequest(

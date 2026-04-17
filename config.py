@@ -15,6 +15,9 @@ RSI_PERIOD = 14
 RSI_BUY_THRESHOLD = 50   # RSI must be above this to confirm BUY
 RSI_SELL_THRESHOLD = 50  # RSI must be below this to confirm SELL
 
+# Position sizing
+MAX_POSITION_PCT = 0.50  # use 50% of cash per trade
+
 # Broker (Alpaca paper trading)
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
