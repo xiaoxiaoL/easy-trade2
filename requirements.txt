@@ -1,4 +1,5 @@
 yfinance
 pandas
+matplotlib
 python-dotenv
 alpaca-py
