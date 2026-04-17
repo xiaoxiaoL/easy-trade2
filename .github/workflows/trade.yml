@@ -6,12 +6,11 @@ on:
     - cron: '0 21 * * 1-5'
   workflow_dispatch:  # allows manual trigger from GitHub UI
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   trade:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Checkout code
