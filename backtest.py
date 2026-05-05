@@ -1,220 +1,132 @@
 """
-Backtest the 5/20 MA crossover + RSI strategy on SPY historical data.
-Usage: python backtest.py
+Backtest value strategy (P/E <= PE_MAX and RSI oversold/overbought)
+on Dow 30 stocks over the past year.
+
+Note: uses current P/E as a static filter (historical P/E not available via yfinance).
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
 import config
-from data.snapshot import MarketSnapshot
-from rules.engine import evaluate, Signal
 
 
-def load_history(ticker: str, period: str = "2y") -> pd.DataFrame:
-    df = yf.download(ticker, period=period, interval="1d",
-                     progress=False, auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    close = df["Close"].squeeze()
-
-    df["ma_fast"] = close.rolling(config.MA_FAST).mean()
-    df["ma_slow"] = close.rolling(config.MA_SLOW).mean()
-
+def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
-    gain = delta.clip(lower=0).rolling(config.RSI_PERIOD).mean()
-    loss = (-delta.clip(upper=0)).rolling(config.RSI_PERIOD).mean()
-    df["rsi"] = 100 - (100 / (1 + gain / loss))
-
-    return df.dropna()
-
-
-def run_backtest(ticker: str = "SPY", period: str = "2y",
-                 starting_cash: float = 100_000.0):
-    print(f"\nBacktest: {ticker} | Period: {period} | "
-          f"Strategy: MA{config.MA_FAST}/{config.MA_SLOW} crossover + RSI\n")
-
-    df = load_history(ticker, period)
-
-    cash = starting_cash
-    shares = 0
-    trades = []
-
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        prev = df.iloc[i - 1]
-        price = float(row["Close"])
-        today = df.index[i].date()
-
-        snapshot = MarketSnapshot(
-            ticker=ticker,
-            date=today,
-            price=price,
-            ma_fast=float(row["ma_fast"]),
-            ma_slow=float(row["ma_slow"]),
-            prev_ma_fast=float(prev["ma_fast"]),
-            prev_ma_slow=float(prev["ma_slow"]),
-            rsi=float(row["rsi"]),
-        )
-
-        signal, reason = evaluate(snapshot)
-
-        if signal == Signal.BUY and shares == 0:
-            shares = int((cash * config.MAX_POSITION_PCT) / price)
-            cash -= shares * price
-            trades.append({"date": today, "action": "BUY",
-                            "price": price, "shares": shares, "cash": cash})
-
-        elif signal == Signal.SELL and shares > 0:
-            cash += shares * price
-            trades.append({"date": today, "action": "SELL",
-                            "price": price, "shares": shares, "cash": cash})
-            shares = 0
-
-    last_price = float(df.iloc[-1]["Close"])
-    portfolio_value = cash + shares * last_price
-    first_price = float(df.iloc[0]["Close"])
-    bh_shares = int((starting_cash * config.MAX_POSITION_PCT) / first_price)
-    bh_value = (starting_cash - bh_shares * first_price) + bh_shares * last_price
-
-    _print_results(trades, starting_cash, portfolio_value, bh_value, shares, last_price)
-    _plot(df, trades, ticker, starting_cash, portfolio_value, bh_value)
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 
-def _print_results(trades, starting_cash, portfolio_value, bh_value, open_shares, last_price):
-    buy_trades = [t for t in trades if t["action"] == "BUY"]
-    sell_trades = [t for t in trades if t["action"] == "SELL"]
+def backtest_ticker(close: pd.Series, pe_ratio: float) -> dict:
+    rsi_series = rsi(close, config.RSI_PERIOD)
+    pe_qualifies = 0 < pe_ratio <= config.PE_MAX
 
-    pnl_list = []
-    for buy, sell in zip(buy_trades, sell_trades):
-        pnl = (sell["price"] - buy["price"]) * sell["shares"]
-        pnl_pct = (sell["price"] - buy["price"]) / buy["price"] * 100
-        pnl_list.append((buy["date"], sell["date"], buy["price"],
-                         sell["price"], sell["shares"], pnl, pnl_pct))
+    cash = 10_000.0
+    position = 0
+    buy_price = 0.0
+    trades = 0
+    wins = 0
+    blacklisted_until = -1  # index — no re-entry until after this
 
-    wins = [p for p in pnl_list if p[5] > 0]
-    losses = [p for p in pnl_list if p[5] <= 0]
-    strategy_return = (portfolio_value - starting_cash) / starting_cash * 100
-    bh_return = (bh_value - starting_cash) / starting_cash * 100
+    for i in range(1, len(close)):
+        price = float(close.iloc[i])
+        r = float(rsi_series.iloc[i])
+        if pd.isna(r):
+            continue
 
-    print(f"{'=' * 55}")
-    print(f"  TRADE LOG")
-    print(f"{'=' * 55}")
-    for t in trades:
-        print(f"  {t['date']}  {t['action']:4s}  "
-              f"{t['shares']:4d} shares @ ${t['price']:7.2f}")
-    if open_shares > 0:
-        print(f"\n  * Still holding {open_shares} shares "
-              f"(valued at ${open_shares * last_price:,.0f})")
+        if pe_qualifies and position == 0 and i > blacklisted_until and r <= config.RSI_OVERSOLD:
+            shares = cash / price  # fractional
+            if shares > 0:
+                cash -= shares * price
+                position = shares
+                buy_price = price
+                trades += 1
 
-    print(f"\n{'=' * 55}")
-    print(f"  COMPLETED TRADES P&L")
-    print(f"{'=' * 55}")
-    if pnl_list:
-        for buy_d, sell_d, bp, sp, _, pnl, pct in pnl_list:
-            flag = "✓" if pnl > 0 else "✗"
-            print(f"  {flag} {buy_d} → {sell_d}  "
-                  f"${bp:.2f}→${sp:.2f}  P&L: ${pnl:+,.0f} ({pct:+.1f}%)")
-    else:
-        print("  No completed round-trip trades yet.")
+        elif position > 0:
+            loss_pct = (price - buy_price) / buy_price
+            if r >= config.RSI_OVERBOUGHT or loss_pct <= -config.STOP_LOSS:
+                if price > buy_price:
+                    wins += 1
+                cash += position * price
+                position = 0
+                if loss_pct <= -config.STOP_LOSS:
+                    blacklisted_until = i + 30  # 30-day cooldown after stop-loss
 
-    print(f"\n{'=' * 55}")
-    print(f"  SUMMARY")
-    print(f"{'=' * 55}")
-    print(f"  Starting cash:       ${starting_cash:>10,.0f}")
-    print(f"  Final value:         ${portfolio_value:>10,.0f}")
-    print(f"  Strategy return:     {strategy_return:>+9.1f}%")
-    print(f"  Buy & hold return:   {bh_return:>+9.1f}%")
-    print(f"  Total signals:       {len(trades):>10d}")
-    print(f"  Completed trades:    {len(pnl_list):>10d}")
-    if pnl_list:
-        win_rate = len(wins) / len(pnl_list) * 100
-        avg_win = sum(p[5] for p in wins) / len(wins) if wins else 0
-        avg_loss = sum(p[5] for p in losses) / len(losses) if losses else 0
-        print(f"  Win rate:            {win_rate:>9.0f}%")
-        print(f"  Avg win:             ${avg_win:>+9,.0f}")
-        print(f"  Avg loss:            ${avg_loss:>+9,.0f}")
-    print(f"{'=' * 55}\n")
+    # Close any open position
+    if position > 0:
+        cash += position * float(close.iloc[-1])
+
+    strategy_pct = (cash - 10_000) / 10_000 * 100
+    bh_pct = (float(close.iloc[-1]) - float(close.iloc[0])) / float(close.iloc[0]) * 100
+    return dict(pe_qualifies=pe_qualifies, strategy_pct=strategy_pct,
+                bh_pct=bh_pct, trades=trades, wins=wins)
 
 
-def _plot(df, trades, ticker, starting_cash, portfolio_value, bh_value):
-    strategy_return = (portfolio_value - starting_cash) / starting_cash * 100
-    bh_return = (bh_value - starting_cash) / starting_cash * 100
+def main():
+    print(f"Backtesting value strategy on S&P 100 (1 year)")
+    print(f"Buy: P/E <= {config.PE_MAX} AND RSI <= {config.RSI_OVERSOLD}")
+    print(f"Sell: RSI >= {config.RSI_OVERBOUGHT}\n")
 
-    buy_dates  = [t["date"] for t in trades if t["action"] == "BUY"]
-    buy_prices = [t["price"] for t in trades if t["action"] == "BUY"]
-    sell_dates  = [t["date"] for t in trades if t["action"] == "SELL"]
-    sell_prices = [t["price"] for t in trades if t["action"] == "SELL"]
+    rows = []
+    for ticker in config.TICKERS:
+        try:
+            df = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
+            close = df["Close"].squeeze()
+            info = yf.Ticker(ticker).info
+            pe = float(info.get("trailingPE") or 0.0)
+            r = backtest_ticker(close, pe)
+            rows.append(dict(ticker=ticker, pe=pe, **r))
+        except Exception as e:
+            print(f"  {ticker}: error — {e}")
 
-    dates = df.index
+    # Print table
+    print(f"{'Ticker':<8} {'P/E':>6} {'Filter':>7} {'Strategy':>10} {'B&H':>8} {'Trades':>7} {'Wins':>5}")
+    print("-" * 55)
+    for r in sorted(rows, key=lambda x: x["strategy_pct"], reverse=True):
+        qualifier = "PASS" if r["pe_qualifies"] else "fail"
+        pe_str = f"{r['pe']:.1f}" if r["pe"] > 0 else "N/A"
+        win_str = f"{r['wins']}/{r['trades']}" if r["trades"] > 0 else "—"
+        print(f"{r['ticker']:<8} {pe_str:>6} {qualifier:>7} {r['strategy_pct']:>+9.1f}% {r['bh_pct']:>+7.1f}% {r['trades']:>7} {win_str:>5}")
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8),
-                                    gridspec_kw={"height_ratios": [3, 1]},
-                                    sharex=True)
-    fig.suptitle(
-        f"{ticker} — MA{config.MA_FAST}/{config.MA_SLOW} Crossover + RSI  |  "
-        f"Strategy: {strategy_return:+.1f}%  vs  Buy & Hold: {bh_return:+.1f}%",
-        fontsize=13, fontweight="bold"
-    )
+    qualifying = [r for r in rows if r["pe_qualifies"]]
+    all_rows = rows
 
-    # --- Price + MAs ---
-    ax1.plot(dates, df["Close"], color="#333333", linewidth=1.2, label="SPY Price")
-    ax1.plot(dates, df["ma_fast"], color="#2196F3", linewidth=1.2,
-             linestyle="--", label=f"MA{config.MA_FAST}")
-    ax1.plot(dates, df["ma_slow"], color="#FF9800", linewidth=1.5,
-             label=f"MA{config.MA_SLOW}")
+    print(f"\n{'='*55}")
+    print(f"Stocks passing P/E filter: {len(qualifying)}/{len(rows)}")
+    if qualifying:
+        avg_s = sum(r["strategy_pct"] for r in qualifying) / len(qualifying)
+        avg_b = sum(r["bh_pct"] for r in qualifying) / len(qualifying)
+        print(f"Avg strategy (qualifying): {avg_s:+.1f}%")
+        print(f"Avg B&H      (qualifying): {avg_b:+.1f}%")
+    avg_bh_all = sum(r["bh_pct"] for r in all_rows) / len(all_rows)
+    print(f"Avg B&H      (all Dow 30): {avg_bh_all:+.1f}%")
 
-    # Shade held periods
-    in_trade = False
-    trade_start = None
-    for t in trades:
-        if t["action"] == "BUY":
-            in_trade = True
-            trade_start = pd.Timestamp(t["date"])
-        elif t["action"] == "SELL" and in_trade:
-            ax1.axvspan(trade_start, pd.Timestamp(t["date"]),
-                        alpha=0.08, color="green")
-            in_trade = False
-    if in_trade:
-        ax1.axvspan(trade_start, dates[-1], alpha=0.08, color="green")
+    # Chart: strategy vs B&H for qualifying stocks
+    if qualifying:
+        tickers = [r["ticker"] for r in qualifying]
+        strat = [r["strategy_pct"] for r in qualifying]
+        bh = [r["bh_pct"] for r in qualifying]
 
-    # BUY / SELL markers
-    ax1.scatter(pd.to_datetime(buy_dates), buy_prices,
-                marker="^", color="#4CAF50", s=120, zorder=5, label="BUY")
-    ax1.scatter(pd.to_datetime(sell_dates), sell_prices,
-                marker="v", color="#F44336", s=120, zorder=5, label="SELL")
-
-    ax1.set_ylabel("Price ($)")
-    ax1.legend(loc="upper left", fontsize=9)
-    ax1.grid(alpha=0.3)
-
-    # --- RSI ---
-    ax2.plot(dates, df["rsi"], color="#9C27B0", linewidth=1.2, label="RSI")
-    ax2.axhline(config.RSI_BUY_THRESHOLD, color="#4CAF50",
-                linestyle="--", linewidth=0.8, label=f"RSI {config.RSI_BUY_THRESHOLD}")
-    ax2.axhline(config.RSI_SELL_THRESHOLD, color="#F44336",
-                linestyle="--", linewidth=0.8)
-    ax2.axhline(70, color="#F44336", linestyle=":", linewidth=0.6, alpha=0.5)
-    ax2.axhline(30, color="#4CAF50", linestyle=":", linewidth=0.6, alpha=0.5)
-    ax2.fill_between(dates, df["rsi"], 70,
-                     where=(df["rsi"] >= 70), alpha=0.15, color="#F44336")
-    ax2.fill_between(dates, df["rsi"], 30,
-                     where=(df["rsi"] <= 30), alpha=0.15, color="#4CAF50")
-    ax2.set_ylim(0, 100)
-    ax2.set_ylabel("RSI")
-    ax2.legend(loc="upper left", fontsize=9)
-    ax2.grid(alpha=0.3)
-
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
-    ax2.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-    plt.xticks(rotation=30)
-
-    plt.tight_layout()
-    plt.savefig("backtest_chart.png", dpi=150, bbox_inches="tight")
-    print("Chart saved → backtest_chart.png")
+        x = range(len(tickers))
+        fig, ax = plt.subplots(figsize=(max(8, len(tickers)), 5))
+        ax.bar([i - 0.2 for i in x], strat, 0.4, label="Strategy", color="steelblue")
+        ax.bar([i + 0.2 for i in x], bh, 0.4, label="Buy & Hold", color="orange")
+        ax.axhline(0, color="black", linewidth=0.8)
+        ax.set_xticks(list(x))
+        ax.set_xticklabels(tickers, rotation=45)
+        ax.set_ylabel("Return (%)")
+        ax.set_title(f"Value Strategy vs Buy & Hold (1y) — P/E≤{config.PE_MAX}, RSI buy≤{config.RSI_OVERSOLD}, sell≥{config.RSI_OVERBOUGHT}")
+        ax.legend()
+        plt.tight_layout()
+        plt.savefig("backtest.png")
+        print(f"\nChart saved to backtest.png")
 
 
 if __name__ == "__main__":
-    run_backtest(ticker="SPY", period="2y")
+    main()

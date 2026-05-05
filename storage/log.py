@@ -15,8 +15,8 @@ def init_db():
                 ticker    TEXT,
                 signal    TEXT,
                 price     REAL,
-                ma_fast   REAL,
-                ma_slow   REAL,
+                pe_ratio  REAL,
+                pb_ratio  REAL,
                 rsi       REAL,
                 reason    TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -27,15 +27,15 @@ def init_db():
 def log_signal(snapshot: MarketSnapshot, signal: Signal, reason: str):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            INSERT INTO signals (date, ticker, signal, price, ma_fast, ma_slow, rsi, reason)
+            INSERT INTO signals (date, ticker, signal, price, pe_ratio, pb_ratio, rsi, reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             str(snapshot.date),
             snapshot.ticker,
             signal.value,
             snapshot.price,
-            snapshot.ma_fast,
-            snapshot.ma_slow,
+            snapshot.pe_ratio,
+            snapshot.pb_ratio,
             snapshot.rsi,
             reason,
         ))

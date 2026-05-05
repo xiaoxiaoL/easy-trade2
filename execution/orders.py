@@ -4,7 +4,7 @@ from rules.engine import Signal
 
 
 def execute(snapshot: MarketSnapshot, signal: Signal) -> str:
-    """Place order based on signal. Returns action taken."""
+    """Place order based on signal. Uses notional (dollar) amounts for fractional share support."""
     if not config.ALPACA_API_KEY:
         return "skipped — no Alpaca credentials configured"
 
@@ -25,30 +25,33 @@ def execute(snapshot: MarketSnapshot, signal: Signal) -> str:
         qty_held = 0.0
 
     if signal == Signal.BUY and qty_held == 0:
-        qty = int((cash * config.MAX_POSITION_PCT) / snapshot.price)
-        if qty < 1:
+        open_positions = len(client.get_all_positions())
+        if open_positions >= config.MAX_POSITIONS:
+            return f"skipped — max {config.MAX_POSITIONS} positions already held ({open_positions} open)"
+        notional = round(cash * config.MAX_POSITION_PCT, 2)
+        if notional < 1:
             return "skipped — insufficient cash"
         order = MarketOrderRequest(
             symbol=snapshot.ticker,
-            qty=qty,
+            notional=notional,
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
         )
         client.submit_order(order)
-        return f"BUY {qty} shares of {snapshot.ticker} @ ~${snapshot.price:.2f}"
+        return f"BUY ${notional:.2f} of {snapshot.ticker} @ ~${snapshot.price:.2f}"
 
     elif signal == Signal.SELL and qty_held > 0:
         order = MarketOrderRequest(
             symbol=snapshot.ticker,
-            qty=int(qty_held),
+            qty=qty_held,
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
         )
         client.submit_order(order)
-        return f"SELL {int(qty_held)} shares of {snapshot.ticker} @ ~${snapshot.price:.2f}"
+        return f"SELL {qty_held} shares of {snapshot.ticker} @ ~${snapshot.price:.2f}"
 
     elif signal == Signal.BUY and qty_held > 0:
-        return f"BUY signal but already holding {int(qty_held)} shares — skipped"
+        return f"BUY signal but already holding {qty_held} shares — skipped"
 
     elif signal == Signal.SELL and qty_held == 0:
         return "SELL signal but no position — skipped"
